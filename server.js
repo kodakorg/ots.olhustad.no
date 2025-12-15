@@ -23,6 +23,10 @@ app.get('/', (req, res) => {
   res.render('create_secret');
 });
 
+app.get('/health', (req, res) => {
+  res.json({ status: 'healthy' });
+});
+
 app.post('/secret', async (req, res) => {
   const encryptedSecret = req.body.encryptedSecret;
   let timeToLive = req.body.ttl;
