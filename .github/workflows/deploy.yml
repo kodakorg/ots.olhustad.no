@@ -2,8 +2,6 @@ name: deploy
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
 permissions:
@@ -11,37 +9,75 @@ permissions:
 
 jobs:
   build:
-    runs-on: [self-hosted, runner-node]
+    runs-on: [self-hosted, runner-nginx]
     steps:
-      - name: Setenv
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set env vars
         run: |
           echo "URL=ots.olhustad.no" >>$GITHUB_ENV
+          echo "PORT=8088" >>$GITHUB_ENV
 
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Update
+      - name: Deploy
         run: |
-          TARGET_DIR="/home/zom/${{ env.URL }}"
-          REPO_URL="git@github.com:${{ github.repository }}.git"
-
-          if [ ! -d "$TARGET_DIR" ]; then
-            echo "Directory does not exist, creating and cloning repository..."
-            mkdir -p "$TARGET_DIR"
-            git clone "$REPO_URL" "$TARGET_DIR" || { echo "Git clone failed"; exit 1; }
-            pushd "$TARGET_DIR"
-          else
-            echo "Directory exists, pulling latest changes..."
-            pushd "$TARGET_DIR"
-            git pull || { echo "Git pull failed"; exit 1; }
+          export NVM_DIR="$HOME/.nvm"
+          [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+          
+          TARGET_DIR="/home/zom/www/${{ env.URL }}"
+          BACKUP_DIR="/home/zom/backups/${{ env.URL }}-$(date +%Y%m%d-%H%M%S)"
+          TEMP_DIR="/tmp/deploy-${{ env.URL }}-$$"
+          
+          # Backup current deployment
+          if [ -d "$TARGET_DIR" ]; then
+            mkdir -p "$(dirname "$BACKUP_DIR")"
+            cp -r "$TARGET_DIR" "$BACKUP_DIR"
+            echo "BACKUP_DIR=$BACKUP_DIR" >> $GITHUB_ENV
           fi
-
-          npm ci || { echo "NPM install failed"; exit 1; }
-          popd
-          sudo systemctl restart ${{ env.URL }} || { echo "Service restart failed"; exit 1; }
-        working-directory: ${{ github.workspace }}
+          
+          # Preserve files
+          mkdir -p "$TEMP_DIR"
+          [ -f "$TARGET_DIR/.env" ] && cp "$TARGET_DIR/.env" "$TEMP_DIR/"
+          [ -d "$TARGET_DIR/public/uploads" ] && cp -r "$TARGET_DIR/public/uploads" "$TEMP_DIR/"
+          
+          # Clean install
+          rm -rf "$TARGET_DIR"
+          git clone "git@github.com:${{ github.repository }}.git" "$TARGET_DIR"
+          cd "$TARGET_DIR"
+          
+          # Restore preserved files
+          [ -f "$TEMP_DIR/.env" ] && cp "$TEMP_DIR/.env" .
+          [ -d "$TEMP_DIR/uploads" ] && mkdir -p public && cp -r "$TEMP_DIR/uploads" public/
+          
+          # Install dependencies
+          npm ci || npm install
+          
+          # Verify main file
+          MAIN_FILE=$(node -e "console.log(require('./package.json').main || 'server.js')" 2>/dev/null || echo "server.js")
+          [ -f "$MAIN_FILE" ] && node -c "$MAIN_FILE"
+          
+          sudo systemctl restart ${{ env.URL }}
+          rm -rf "$TEMP_DIR"
 
       - name: Verify
         run: |
           sleep 5
-          sudo systemctl is-active ${{ env.URL }} || { echo "Service failed to start"; exit 1; }
+          sudo systemctl is-active ${{ env.URL }} --quiet || exit 1
+          curl -sf http://localhost:${{ env.PORT }}/health || exit 1
+
+      - name: Cleanup Backups
+        if: success()
+        run: |
+          BACKUP_BASE="/home/zom/backups"
+          find "$BACKUP_BASE" -name "${{ env.URL }}-*" -type d | sort -r | tail -n +3 | xargs rm -rf
+        continue-on-error: true
+
+      - name: Rollback on Failure
+        if: failure() && env.BACKUP_DIR != ''
+        run: |
+          TARGET_DIR="/home/zom/www/${{ env.URL }}"
+          echo "Deployment failed, restoring from backup..."
+          rm -rf "$TARGET_DIR"
+          cp -r "$BACKUP_DIR" "$TARGET_DIR"
+          sudo systemctl restart ${{ env.URL }}
+          echo "Rolled back to previous version"

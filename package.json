@@ -1,5 +1,5 @@
 {
-  "name": "ots",
+  "name": "ots.olhustad.no",
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
@@ -11,8 +11,8 @@
   "description": "Create secret messages that can only be read once",
   "dependencies": {
     "ejs": "^3.1.10",
-    "express": "^4.21.2",
-    "redis": "^4.7.0",
-    "uuid": "^11.0.5"
+    "express": "^5.2.1",
+    "redis": "^5.10.0",
+    "uuid": "^13.0.0"
   }
 }
