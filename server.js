@@ -2,6 +2,7 @@ const express = require('express');
 const redis = require('redis');
 const { v4: uuidv4 } = require('uuid');
 const path = require("path");
+const PORT = process.env.PORT || 3000;
 
 const app = express();
 app.use(express.json());
@@ -15,7 +16,7 @@ const redisURL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
 const client = redis.createClient({
   url: redisURL
 });
-const PORT = process.env.PORT || 8088;
+
 
 client.on('error', (err) => console.error('Redis Client Error', err));
 
