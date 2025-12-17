@@ -91,9 +91,6 @@ app.post('/secret', async (req, res) => {
   const encryptedSecret = req.body.encryptedSecret;
   let timeToLive = req.body.ttl;
 
-  console.log('encryptedSecret:', encryptedSecret);
-  console.log('timeToLive:', timeToLive);
-
   if (!encryptedSecret) {
     return res.status(400).json({ error: 'ecryptedSecret missing' });
   }
