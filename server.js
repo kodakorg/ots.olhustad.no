@@ -3,6 +3,7 @@ const redis = require('redis');
 const { v4: uuidv4 } = require('uuid');
 const path = require("path");
 const PORT = process.env.PORT || 3000;
+const USE_REDIS = process.env.USE_REDIS === 'true';
 
 const app = express();
 app.use(express.json());
@@ -12,20 +13,78 @@ app.use('/img', express.static(path.join(__dirname, 'public/img')));
 
 app.set('view engine', 'ejs');
 
-const redisURL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-const client = redis.createClient({
-  url: redisURL
-});
+// In-memory store for development
+const memoryStore = new Map();
 
+// Storage adapter interface
+const storage = {
+  async set(key, value, options) {
+    if (USE_REDIS) {
+      return await redisClient.set(key, value, options);
+    } else {
+      memoryStore.set(key, { value, expiresAt: Date.now() + (options.EX * 1000) });
+      return 'OK';
+    }
+  },
 
-client.on('error', (err) => console.error('Redis Client Error', err));
+  async get(key) {
+    if (USE_REDIS) {
+      return await redisClient.get(key);
+    } else {
+      const item = memoryStore.get(key);
+      if (!item) return null;
+
+      // Check if expired
+      if (Date.now() > item.expiresAt) {
+        memoryStore.delete(key);
+        return null;
+      }
+      return item.value;
+    }
+  },
+
+  async del(key) {
+    if (USE_REDIS) {
+      return await redisClient.del(key);
+    } else {
+      memoryStore.delete(key);
+      return 1;
+    }
+  }
+};
+
+// Redis client setup (only used if USE_REDIS is true)
+let redisClient;
+if (USE_REDIS) {
+  const redisURL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+  redisClient = redis.createClient({
+    url: redisURL
+  });
+  redisClient.on('error', (err) => console.error('Redis Client Error', err));
+}
+
+// Cleanup expired entries every minute (for in-memory store)
+if (!USE_REDIS) {
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, item] of memoryStore.entries()) {
+      if (now > item.expiresAt) {
+        memoryStore.delete(key);
+      }
+    }
+  }, 60000);
+}
 
 app.get('/', (req, res) => {
   res.render('create_secret');
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'healthy' });
+  res.json({
+    status: 'healthy',
+    storage: USE_REDIS ? 'redis' : 'memory',
+    secrets: USE_REDIS ? 'N/A' : memoryStore.size
+  });
 });
 
 app.post('/secret', async (req, res) => {
@@ -48,7 +107,7 @@ app.post('/secret', async (req, res) => {
   let ttlInt = parseInt(ttl);
 
   try {
-    await client.set(id, JSON.stringify(encryptedSecret), { EX: ttlInt });
+    await storage.set(id, JSON.stringify(encryptedSecret), { EX: ttlInt });
     res.json({ id });
   } catch (error) {
     console.error('Could not store secret:', error);
@@ -74,7 +133,7 @@ app.get('/secret/:id', async (req, res) => {
   }
 
   try {
-    const encryptedSecret = await client.get(id);
+    const encryptedSecret = await storage.get(id);
     if (!encryptedSecret) {
       return res.render('view_secret', { secret: "notfound" });
     }
@@ -92,7 +151,7 @@ app.get('/secret/:id', async (req, res) => {
 app.delete('/secret/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    await client.del(id);
+    await storage.del(id);
     res.json({ success: true });
   } catch (error) {
     console.error('Error deleting secret:', error);
@@ -102,10 +161,16 @@ app.delete('/secret/:id', async (req, res) => {
 
 async function startServer() {
   try {
-    await client.connect();
-    console.log('Connected to Redis');
+    if (USE_REDIS) {
+      await redisClient.connect();
+      console.log('Connected to Redis');
+    } else {
+      console.log('Using in-memory storage (development mode)');
+    }
+
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
+      console.log(`Storage mode: ${USE_REDIS ? 'Redis' : 'In-Memory'}`);
     });
   } catch (error) {
     console.error('Error starting server:', error);

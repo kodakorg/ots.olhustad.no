@@ -4,7 +4,7 @@
   "main": "server.js",
   "scripts": {
     "dev": "nodemon -e ejs,js,css server.js",
-    "start": "node server.js"
+    "start": "USE_REDIS=true node server.js"
   },
   "author": "Ole Severin Hustad",
   "license": "MIT",
