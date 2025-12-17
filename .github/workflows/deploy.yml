@@ -1,83 +1,68 @@
-name: deploy
+name: Deploy Ots.olhustad.no
+
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   build:
     runs-on: [self-hosted, runner-nginx]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set env vars
-        run: |
-          echo "URL=ots.olhustad.no" >>$GITHUB_ENV
-          echo "PORT=8088" >>$GITHUB_ENV
-
-      - name: Deploy
+      - name: Setup Node
         run: |
           export NVM_DIR="$HOME/.nvm"
           [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-          
+          echo "$NVM_DIR/versions/node/$(node -v)/bin" >> $GITHUB_PATH
+
+      - name: Set environment variables
+        run: |
+          echo "URL=ots.olhustad.no" >> $GITHUB_ENV
+          echo "APP_NAME=ots.olhustad" >> $GITHUB_ENV
+          echo "PORT=3006" >> $GITHUB_ENV
+
+      - name: Deploy
+        run: |
           TARGET_DIR="/home/zom/www/${{ env.URL }}"
-          BACKUP_DIR="/home/zom/backups/${{ env.URL }}-$(date +%Y%m%d-%H%M%S)"
-          TEMP_DIR="/tmp/deploy-${{ env.URL }}-$$"
+          CLONE_DIR="/tmp/deploy-${{ env.URL }}-$$/repo"
+
+          mkdir -p "$TARGET_DIR"
+          git clone "git@github.com:${{ github.repository }}.git" "$CLONE_DIR"
+
+          rsync -aq --delete \
+            --exclude='node_modules' \
+            --exclude='.env' \
+            --exclude='logs' \
+            --exclude='public/uploads' \
+            "$CLONE_DIR/" "$TARGET_DIR/"
           
-          # Backup current deployment
-          if [ -d "$TARGET_DIR" ]; then
-            mkdir -p "$(dirname "$BACKUP_DIR")"
-            cp -r "$TARGET_DIR" "$BACKUP_DIR"
-            echo "BACKUP_DIR=$BACKUP_DIR" >> $GITHUB_ENV
-          fi
-          
-          # Preserve files
-          mkdir -p "$TEMP_DIR"
-          [ -f "$TARGET_DIR/.env" ] && cp "$TARGET_DIR/.env" "$TEMP_DIR/"
-          [ -d "$TARGET_DIR/public/uploads" ] && cp -r "$TARGET_DIR/public/uploads" "$TEMP_DIR/"
-          
-          # Clean install
-          rm -rf "$TARGET_DIR"
-          git clone "git@github.com:${{ github.repository }}.git" "$TARGET_DIR"
+          rm -rf "$CLONE_DIR"
+
           cd "$TARGET_DIR"
-          
-          # Restore preserved files
-          [ -f "$TEMP_DIR/.env" ] && cp "$TEMP_DIR/.env" .
-          [ -d "$TEMP_DIR/uploads" ] && mkdir -p public && cp -r "$TEMP_DIR/uploads" public/
-          
-          # Install dependencies
-          npm ci || npm install
-          
-          # Verify main file
-          MAIN_FILE=$(node -e "console.log(require('./package.json').main || 'server.js')" 2>/dev/null || echo "server.js")
-          [ -f "$MAIN_FILE" ] && node -c "$MAIN_FILE"
-          
-          sudo systemctl restart ${{ env.URL }}
-          rm -rf "$TEMP_DIR"
+          npm ci
+          pm2 start ecosystem.config.js --update-env
 
       - name: Verify
         run: |
-          sleep 5
-          sudo systemctl is-active ${{ env.URL }} --quiet || exit 1
-          curl -sf http://localhost:${{ env.PORT }}/health || exit 1
-
-      - name: Cleanup Backups
-        if: success()
-        run: |
-          BACKUP_BASE="/home/zom/backups"
-          find "$BACKUP_BASE" -name "${{ env.URL }}-*" -type d | sort -r | tail -n +3 | xargs rm -rf
-        continue-on-error: true
-
-      - name: Rollback on Failure
-        if: failure() && env.BACKUP_DIR != ''
-        run: |
-          TARGET_DIR="/home/zom/www/${{ env.URL }}"
-          echo "Deployment failed, restoring from backup..."
-          rm -rf "$TARGET_DIR"
-          cp -r "$BACKUP_DIR" "$TARGET_DIR"
-          sudo systemctl restart ${{ env.URL }}
-          echo "Rolled back to previous version"
+          echo "Waiting for app to be ready..."
+          MAX_ATTEMPTS=10
+          ATTEMPT=1
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "Health check attempt $ATTEMPT/$MAX_ATTEMPTS..."
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ env.PORT }}/health || echo "000")
+            
+            if [ "$HTTP_CODE" -eq 200 ]; then
+              echo "✓ Health check passed with HTTP code: 200"
+              exit 0
+            fi
+            
+            echo "Health check returned: $HTTP_CODE (retrying in 2s...)"
+            sleep 2
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+          
+          echo "✗ Health check failed after $MAX_ATTEMPTS attempts"
+          echo "Showing recent logs:"
+          pm2 logs ${{ env.APP_NAME }} --lines 50 --nostream || true
+          exit 1
