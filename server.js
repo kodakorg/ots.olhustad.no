@@ -1,3 +1,4 @@
+// server.js
 const express = require('express');
 const redis = require('redis');
 const { v4: uuidv4 } = require('uuid');
@@ -12,11 +13,7 @@ app.use('/css', express.static(path.join(__dirname, 'public/css')));
 app.use('/img', express.static(path.join(__dirname, 'public/img')));
 
 app.set('view engine', 'ejs');
-
-// In-memory store for development
 const memoryStore = new Map();
-
-// Storage adapter interface
 const storage = {
   async set(key, value, options) {
     if (USE_REDIS) {
@@ -32,9 +29,9 @@ const storage = {
       return await redisClient.get(key);
     } else {
       const item = memoryStore.get(key);
+
       if (!item) return null;
 
-      // Check if expired
       if (Date.now() > item.expiresAt) {
         memoryStore.delete(key);
         return null;
@@ -53,7 +50,6 @@ const storage = {
   }
 };
 
-// Redis client setup (only used if USE_REDIS is true)
 let redisClient;
 if (USE_REDIS) {
   const redisURL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
@@ -63,7 +59,6 @@ if (USE_REDIS) {
   redisClient.on('error', (err) => console.error('Redis Client Error', err));
 }
 
-// Cleanup expired entries every minute (for in-memory store)
 if (!USE_REDIS) {
   setInterval(() => {
     const now = Date.now();
@@ -115,44 +110,32 @@ app.post('/secret', async (req, res) => {
 app.get('/secret/:id', async (req, res) => {
   const { id } = req.params;
 
-  // Set headers to discourage link previews
   res.setHeader('X-Robots-Tag', 'noindex, nofollow');
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
   res.setHeader('Pragma', 'no-cache');
 
-  // Check if it's a bot/crawler/link previewer
   const userAgent = req.headers['user-agent'] || '';
   const isCrawler = /bot|crawler|spider|preview|facebook|twitter|linkedin|slack|discord|whatsapp|messenger/i.test(userAgent);
 
-  if (isCrawler) {
-    // For crawlers, return a generic page without accessing the actual secret
-    return res.render('view_secret', { secret: "Please open this link directly in your browser" });
-  }
+  res.render('view_secret', { isCrawler });
+});
+
+app.post('/secret/:id/reveal', async (req, res) => {
+  const { id } = req.params;
 
   try {
     const encryptedSecret = await storage.get(id);
+
     if (!encryptedSecret) {
-      return res.render('view_secret', { secret: "notfound" });
+      return res.status(404).json({ error: 'Secret not found or already revealed' });
     }
 
-    // Only delete the secret once the user explicitly requests to view it
-    // The actual deletion will now happen via API call
-    res.render('view_secret', { secret: encryptedSecret });
-  } catch (error) {
-    console.error('Error getting secret:', error);
-    res.status(500).send('Error getting secret (500)');
-  }
-});
-
-// New endpoint to delete the secret after user confirmation
-app.delete('/secret/:id', async (req, res) => {
-  const { id } = req.params;
-  try {
     await storage.del(id);
-    res.json({ success: true });
+
+    res.json({ encryptedSecret: JSON.parse(encryptedSecret) });
   } catch (error) {
-    console.error('Error deleting secret:', error);
-    res.status(500).json({ error: 'Error deleting secret' });
+    console.error('Error revealing secret:', error);
+    res.status(500).json({ error: 'Error retrieving secret' });
   }
 });
 
