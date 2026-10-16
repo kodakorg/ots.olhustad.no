@@ -1,18 +1,62 @@
 // server.js
 const express = require('express');
+const helmet = require('helmet');
+const { rateLimit } = require('express-rate-limit');
 const redis = require('redis');
 const { v4: uuidv4 } = require('uuid');
 const path = require("path");
 const PORT = process.env.PORT || 3000;
 const USE_REDIS = process.env.USE_REDIS === 'true';
 
+const KEY_PREFIX = 'ots:';
+const ID_PATTERN = /^[0-9a-f]{32}$/;
+const TTL_SECONDS = {
+  '24': 24 * 3600,
+  '48': 48 * 3600,
+  'week': 168 * 3600
+};
+
 const app = express();
+// Requests arrive through Cloudflare; trust one proxy hop so req.ip is the client IP
+app.set('trust proxy', 1);
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", 'https://fonts.googleapis.com'],
+      fontSrc: ['https://fonts.gstatic.com'],
+      imgSrc: ["'self'", 'https://img.shields.io'],
+      connectSrc: ["'self'"],
+      frameAncestors: ["'none'"],
+      formAction: ["'self'"],
+      baseUri: ["'none'"],
+      objectSrc: ["'none'"]
+    }
+  },
+  xFrameOptions: { action: 'deny' }
+}));
 app.use(express.json());
-app.use(express.static("public"));
-app.use('/css', express.static(path.join(__dirname, 'public/css')));
-app.use('/img', express.static(path.join(__dirname, 'public/img')));
+app.use(express.static(path.join(__dirname, 'public')));
 
 app.set('view engine', 'ejs');
+
+const createLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many secrets created, try again later' }
+});
+
+const revealLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 60,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many requests, try again later' }
+});
+
 const memoryStore = new Map();
 const storage = {
   async set(key, value, options) {
@@ -24,28 +68,16 @@ const storage = {
     }
   },
 
-  async get(key) {
+  // Atomically read and delete, so a secret can never be returned twice
+  async getDel(key) {
     if (USE_REDIS) {
-      return await redisClient.get(key);
+      return await redisClient.getDel(key);
     } else {
       const item = memoryStore.get(key);
-
-      if (!item) return null;
-
-      if (Date.now() > item.expiresAt) {
-        memoryStore.delete(key);
-        return null;
-      }
-      return item.value;
-    }
-  },
-
-  async del(key) {
-    if (USE_REDIS) {
-      return await redisClient.del(key);
-    } else {
       memoryStore.delete(key);
-      return 1;
+
+      if (!item || Date.now() > item.expiresAt) return null;
+      return item.value;
     }
   }
 };
@@ -82,24 +114,22 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.post('/secret', async (req, res) => {
+app.post('/secret', createLimiter, async (req, res) => {
   const encryptedSecret = req.body.encryptedSecret;
-  let timeToLive = req.body.ttl;
+  const ttl = Object.hasOwn(TTL_SECONDS, req.body.ttl) ? TTL_SECONDS[req.body.ttl] : null;
 
   if (!encryptedSecret) {
     return res.status(400).json({ error: 'ecryptedSecret missing' });
   }
 
+  if (!ttl) {
+    return res.status(400).json({ error: 'Invalid ttl' });
+  }
+
   const id = uuidv4().replace(/-/g, '');
 
-  if (timeToLive == "week") {
-    timeToLive = 168;
-  }
-  let ttl = timeToLive * 3600;
-  let ttlInt = parseInt(ttl);
-
   try {
-    await storage.set(id, JSON.stringify(encryptedSecret), { EX: ttlInt });
+    await storage.set(KEY_PREFIX + id, JSON.stringify(encryptedSecret), { EX: ttl });
     res.json({ id });
   } catch (error) {
     console.error('Could not store secret:', error);
@@ -120,17 +150,25 @@ app.get('/secret/:id', async (req, res) => {
   res.render('view_secret', { isCrawler });
 });
 
-app.post('/secret/:id/reveal', async (req, res) => {
+app.post('/secret/:id/reveal', revealLimiter, async (req, res) => {
   const { id } = req.params;
 
+  if (!ID_PATTERN.test(id)) {
+    return res.status(404).json({ error: 'Secret not found or already revealed' });
+  }
+
   try {
-    const encryptedSecret = await storage.get(id);
+    let encryptedSecret = await storage.getDel(KEY_PREFIX + id);
+
+    // Secrets created before keys were prefixed. Safe to remove once the
+    // longest TTL (one week) has passed since this was deployed.
+    if (!encryptedSecret && USE_REDIS) {
+      encryptedSecret = await storage.getDel(id);
+    }
 
     if (!encryptedSecret) {
       return res.status(404).json({ error: 'Secret not found or already revealed' });
     }
-
-    await storage.del(id);
 
     res.json({ encryptedSecret: JSON.parse(encryptedSecret) });
   } catch (error) {

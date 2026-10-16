@@ -1,0 +1,91 @@
+function arrayBufferToBase64(buffer) {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return window.btoa(binary);
+}
+
+async function encryptSecret(secret) {
+  const key = await window.crypto.subtle.generateKey(
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
+
+  const iv = window.crypto.getRandomValues(new Uint8Array(12));
+
+  const encoder = new TextEncoder();
+  const encodedSecret = encoder.encode(secret);
+
+  const ciphertext = await window.crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    encodedSecret
+  );
+
+  const rawKey = await window.crypto.subtle.exportKey('raw', key);
+  const keyBase64 = arrayBufferToBase64(rawKey);
+
+  const encryptedSecret = {
+    iv: Array.from(iv),
+    data: Array.from(new Uint8Array(ciphertext))
+  };
+
+  return { key: keyBase64, encryptedSecret };
+}
+
+document.getElementById('submitBtn').addEventListener('click', async () => {
+  const secretText = document.getElementById('secretInput').value.trim();
+  if (!secretText) {
+    alert('Write a secret before generating a URL.');
+    return;
+  }
+
+  let encryptionResult;
+  try {
+    encryptionResult = await encryptSecret(secretText);
+  } catch (error) {
+    console.error('Encryption failed:', error);
+    alert('Encryption failed.');
+    return;
+  }
+
+  try {
+    const response = await fetch('/secret', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        encryptedSecret: encryptionResult.encryptedSecret,
+        ttl: document.getElementById('dropdown').value
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to send to server');
+    }
+
+    const resultData = await response.json();
+    const id = resultData.id;
+
+    const url = `${window.location.origin}/secret/${id}#key=${encodeURIComponent(encryptionResult.key)}`;
+    document.getElementById('inputContainer').style.display = 'none';
+    document.getElementById('outputContainer').removeAttribute('hidden');
+    document.getElementById('secretOutput').value = url;
+    document.getElementById('copyUrl').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(url);
+        document.getElementById('urlCopied').textContent = 'URL copied to clipboard!';
+      } catch (err) {
+        console.error("Could not copy URL: ", err);
+        document.getElementById('urlCopied').textContent = 'Could not copy URL.';
+      }
+    });
+  } catch (error) {
+    console.error('Error sending to server:', error);
+    alert('Error sending to server.');
+  }
+});
