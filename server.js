@@ -186,7 +186,8 @@ async function startServer() {
       console.log('Using in-memory storage (development mode)');
     }
 
-    app.listen(PORT, () => {
+    app.listen(PORT, (err) => {
+      if (err) throw err;
       console.log(`Server running on port ${PORT}`);
       console.log(`Storage mode: ${USE_REDIS ? 'Redis' : 'In-Memory'}`);
     });
