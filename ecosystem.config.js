@@ -1,6 +1,6 @@
 module.exports = {
     apps: [{
-        name: 'ots.olhustad',
+        name: 'ots.olhustad.no',
         script: 'npm',
         args: 'run start',
         cwd: '/home/zom/www/ots.olhustad.no',
